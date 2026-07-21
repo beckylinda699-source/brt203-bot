@@ -74,7 +74,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Welcome {user.first_name}! You're subscribed to updates.\n\n"
         f"Your referral link:\nhttps://t.me/BRT203bot?start=ref_{uid}\n\n"
-        f"Send /stop anytime to unsubscribe."
+        f"Send /help to see all commands, or /stop anytime to unsubscribe."
     )
 
 
@@ -88,7 +88,9 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if existing:
         cur.execute("UPDATE subscribers SET active = FALSE WHERE user_id = %s", (uid,))
         conn.commit()
-        await update.message.reply_text("You've been unsubscribed. Send /start anytime to rejoin.")
+        await update.message.reply_text(
+            "You've been unsubscribed. Send /start anytime to rejoin."
+        )
     else:
         await update.message.reply_text("You're not currently subscribed.")
 
@@ -107,6 +109,16 @@ async def myreferrals(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     count = row["referral_count"] if row else 0
     await update.message.reply_text(f"You've referred {count} people so far!")
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Available commands:\n"
+        "/start - Subscribe & get your referral link\n"
+        "/stop - Unsubscribe from updates\n"
+        "/myreferrals - See your referral count\n"
+        "/help - Show this message"
+    )
 
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -168,14 +180,20 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def error_handler(update, context):
+    logger.error(f"Update {update} caused error: {context.error}")
+
+
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("myreferrals", myreferrals))
+    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("stats", stats))
+    app.add_error_handler(error_handler)
     app.run_polling()
 
 
