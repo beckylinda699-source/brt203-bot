@@ -3,9 +3,10 @@ import logging
 import asyncio
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
 from telegram.ext import (
-    Application, CommandHandler, ContextTypes
+    Application, CommandHandler, ContextTypes, MessageHandler, filters
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -14,7 +15,11 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 DATABASE_URL = os.environ.get("DATABASE_URL")
-BROADCAST_DELAY = 0.05  # ~20 messages/sec
+CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "0"))  # numeric channel ID, e.g. -1001234567890
+BROADCAST_DELAY = 0.05
+
+BOT_USERNAME = "BRT203bot"
+CHANNEL_LINK = "https://t.me/Builtfromscratchh"
 
 
 def get_conn():
@@ -71,10 +76,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur.close()
     conn.close()
 
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 Join Our Channel", url=CHANNEL_LINK)]
+    ])
+
     await update.message.reply_text(
         f"Welcome {user.first_name}! You're subscribed to updates.\n\n"
-        f"Your referral link:\nhttps://t.me/BRT203bot?start=ref_{uid}\n\n"
-        f"Send /help to see all commands, or /stop anytime to unsubscribe."
+        f"Your referral link:\nhttps://t.me/{BOT_USERNAME}?start=ref_{uid}\n\n"
+        f"Send /help to see all commands, or /stop anytime to unsubscribe.",
+        reply_markup=keyboard
     )
 
 
@@ -88,9 +98,7 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if existing:
         cur.execute("UPDATE subscribers SET active = FALSE WHERE user_id = %s", (uid,))
         conn.commit()
-        await update.message.reply_text(
-            "You've been unsubscribed. Send /start anytime to rejoin."
-        )
+        await update.message.reply_text("You've been unsubscribed. Send /start anytime to rejoin.")
     else:
         await update.message.reply_text("You're not currently subscribed.")
 
@@ -111,12 +119,49 @@ async def myreferrals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"You've referred {count} people so far!")
 
 
+async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT username, referral_count FROM subscribers "
+        "WHERE referral_count > 0 ORDER BY referral_count DESC LIMIT 10"
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not rows:
+        await update.message.reply_text("No referrals yet. Be the first!")
+        return
+
+    text = "🏆 Top Referrers\n\n"
+    medals = ["🥇", "🥈", "🥉"]
+    for i, row in enumerate(rows):
+        prefix = medals[i] if i < 3 else f"{i+1}."
+        name = f"@{row['username']}" if row["username"] else "Anonymous"
+        text += f"{prefix} {name} — {row['referral_count']} referrals\n"
+
+    await update.message.reply_text(text)
+
+
+async def join_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 Join Our Channel", url=CHANNEL_LINK)]
+    ])
+    await update.message.reply_text(
+        "Tap below to join our channel for daily updates:",
+        reply_markup=keyboard
+    )
+
+
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Available commands:\n"
         "/start - Subscribe & get your referral link\n"
         "/stop - Unsubscribe from updates\n"
         "/myreferrals - See your referral count\n"
+        "/leaderboard - See top referrers\n"
+        "/joinchannel - Get the channel link\n"
         "/help - Show this message"
     )
 
@@ -127,7 +172,11 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        await update.message.reply_text("Usage: /broadcast your message here")
+        await update.message.reply_text(
+            "Usage: /broadcast your message here\n\n"
+            "Supports HTML formatting:\n"
+            "<b>bold</b>, <i>italic</i>, <a href='https://example.com'>link</a>"
+        )
         return
 
     message = " ".join(context.args)
@@ -148,7 +197,9 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur = conn.cursor()
     for uid in active_subs:
         try:
-            await context.bot.send_message(chat_id=uid, text=message)
+            await context.bot.send_message(
+                chat_id=uid, text=message, parse_mode=ParseMode.HTML
+            )
             sent += 1
         except Exception as e:
             logger.warning(f"Failed to send to {uid}: {e}")
@@ -161,6 +212,55 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur.close()
     conn.close()
     await update.message.reply_text(f"Broadcast done. Sent: {sent}, Failed: {failed}")
+
+
+async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Auto-forwards new posts from your linked channel to all active subscribers."""
+    post = update.channel_post
+    if not post or post.chat_id != CHANNEL_ID:
+        return
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM subscribers WHERE active = TRUE")
+    active_subs = [row["user_id"] for row in cur.fetchall()]
+    cur.close()
+
+    logger.info(f"New channel post detected. Forwarding to {len(active_subs)} subscribers.")
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔔 Get Instant Updates", url=f"https://t.me/{BOT_USERNAME}?start=channel")]
+    ])
+
+    sent, failed = 0, 0
+    cur = conn.cursor()
+    for uid in active_subs:
+        try:
+            await context.bot.copy_message(
+                chat_id=uid,
+                from_chat_id=CHANNEL_ID,
+                message_id=post.message_id,
+                reply_markup=keyboard
+            )
+            sent += 1
+        except Exception as e:
+            logger.warning(f"Failed to forward to {uid}: {e}")
+            if "bot was blocked" in str(e).lower() or "chat not found" in str(e).lower():
+                cur.execute("UPDATE subscribers SET active = FALSE WHERE user_id = %s", (uid,))
+            failed += 1
+        await asyncio.sleep(BROADCAST_DELAY)
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"Channel post auto-forwarded. Sent: {sent}, Failed: {failed}"
+        )
+    except Exception:
+        pass
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -190,11 +290,14 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("myreferrals", myreferrals))
+    app.add_handler(CommandHandler("leaderboard", leaderboard))
+    app.add_handler(CommandHandler("joinchannel", join_channel))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, channel_post_handler))
     app.add_error_handler(error_handler)
-    app.run_polling()
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
