@@ -33,7 +33,8 @@ def init_db():
             username TEXT,
             referred_by BIGINT,
             referral_count INT DEFAULT 0,
-            active BOOLEAN DEFAULT TRUE
+            active BOOLEAN DEFAULT TRUE,
+            source TEXT DEFAULT 'organic'
         )
     """)
     conn.commit()
@@ -46,11 +47,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = user.id
 
     ref_id = None
+    source = "organic"
+
     if context.args:
-        try:
-            ref_id = int(context.args[0].replace("ref_", ""))
-        except ValueError:
-            ref_id = None
+        arg = context.args[0]
+        if arg == "ads":
+            source = "ads"
+        else:
+            try:
+                ref_id = int(arg.replace("ref_", ""))
+                source = "referral"
+            except ValueError:
+                pass
 
     conn = get_conn()
     cur = conn.cursor()
@@ -59,8 +67,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not existing:
         cur.execute(
-            "INSERT INTO subscribers (user_id, username, referred_by, active) VALUES (%s, %s, %s, TRUE)",
-            (uid, user.username, ref_id)
+            "INSERT INTO subscribers (user_id, username, referred_by, active, source) VALUES (%s, %s, %s, TRUE, %s)",
+            (uid, user.username, ref_id, source)
         )
         if ref_id and ref_id != uid:
             cur.execute(
@@ -205,11 +213,22 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = cur.fetchone()["total"]
     cur.execute("SELECT COUNT(*) as active FROM subscribers WHERE active = TRUE")
     active = cur.fetchone()["active"]
+    cur.execute("SELECT COUNT(*) as ads FROM subscribers WHERE source = 'ads'")
+    ads = cur.fetchone()["ads"]
+    cur.execute("SELECT COUNT(*) as referral FROM subscribers WHERE source = 'referral'")
+    referral = cur.fetchone()["referral"]
+    cur.execute("SELECT COUNT(*) as organic FROM subscribers WHERE source = 'organic'")
+    organic = cur.fetchone()["organic"]
     cur.close()
     conn.close()
 
     await update.message.reply_text(
-        f"Total subscribers: {total}\nActive: {active}\nUnsubscribed: {total - active}"
+        f"Total subscribers: {total}\n"
+        f"Active: {active}\n"
+        f"Unsubscribed: {total - active}\n\n"
+        f"From ads: {ads}\n"
+        f"From referrals: {referral}\n"
+        f"Organic: {organic}"
     )
 
 
